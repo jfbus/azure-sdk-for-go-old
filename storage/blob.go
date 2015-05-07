@@ -526,11 +526,11 @@ func (b BlobStorageClient) CreateBlockBlob(container, name string) error {
 // data stream into chunks and uploading as blocks. Commits the block
 // list at the end. This is a helper method built on top of PutBlock
 // and PutBlockList methods with sequential block ID counting logic.
-func (b BlobStorageClient) PutBlockBlob(container, name string, blob io.Reader) error { // TODO (ahmetalpbalkan) consider ReadCloser and closing
-	return b.putBlockBlob(container, name, blob, MaxBlobBlockSize)
+func (b BlobStorageClient) PutBlockBlob(container, name string, blob io.Reader, blobTotalSize int64) error { // TODO (ahmetalpbalkan) consider ReadCloser and closing
+	return b.putBlockBlob(container, name, blob, MaxBlobBlockSize, blobTotalSize)
 }
 
-func (b BlobStorageClient) putBlockBlob(container, name string, blob io.Reader, chunkSize int) error {
+func (b BlobStorageClient) putBlockBlob(container, name string, blob io.Reader, chunkSize int, blobTotalSize int64) error {
 	if chunkSize <= 0 || chunkSize > MaxBlobBlockSize {
 		chunkSize = MaxBlobBlockSize
 	}
@@ -549,21 +549,30 @@ func (b BlobStorageClient) putBlockBlob(container, name string, blob io.Reader, 
 		// Does not fit into one block. Upload block by block then commit the block list
 		blockList := []Block{}
 
+		var totalUploadedData int64 = 0
 		// Put blocks
 		for blockNum := 0; ; blockNum++ {
 			id := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%011d", blockNum)))
 			data := chunk[:n]
 			log.Printf("put block id %d with size %v (max size = %d)", blockNum, uint64(len(data)), uint64(len(chunk)))
 			err = b.PutBlock(container, name, id, data)
+			totalUploadedData = totalUploadedData + int64(len(data))
 			if err != nil {
 				return err
 			}
+
 			blockList = append(blockList, Block{id, BlockStatusLatest})
 
 			// Read next block
 			n, err := io.ReadFull(blob, chunk)
 			if err != nil && err != io.EOF {
-				return err
+				totalUploadedData = totalUploadedData + int64(n)
+				if totalUploadedData == blobTotalSize {
+					break
+				} else {
+					log.Printf("total uploaded data = %d (compare to %d)", totalUploadedData, blobTotalSize)
+					return err
+				}
 			}
 			if err == io.EOF {
 				break
