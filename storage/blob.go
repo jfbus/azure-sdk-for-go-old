@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -535,7 +536,8 @@ func (b BlobStorageClient) putBlockBlob(container, name string, blob io.Reader, 
 	}
 
 	chunk := make([]byte, chunkSize)
-	n, err := blob.Read(chunk)
+	n, err := io.ReadFull(blob, chunk)
+	//n, err := blob.Read(chunk)
 	if err != nil && err != io.EOF {
 		return err
 	}
@@ -551,6 +553,7 @@ func (b BlobStorageClient) putBlockBlob(container, name string, blob io.Reader, 
 		for blockNum := 0; ; blockNum++ {
 			id := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%011d", blockNum)))
 			data := chunk[:n]
+			log.Printf("put block id %d with size %v (max size = %d)", blockNum, uint64(len(data)), uint64(len(chunk)))
 			err = b.PutBlock(container, name, id, data)
 			if err != nil {
 				return err
@@ -558,15 +561,17 @@ func (b BlobStorageClient) putBlockBlob(container, name string, blob io.Reader, 
 			blockList = append(blockList, Block{id, BlockStatusLatest})
 
 			// Read next block
-			n, err = blob.Read(chunk)
+			n, err := io.ReadFull(blob, chunk)
 			if err != nil && err != io.EOF {
 				return err
 			}
 			if err == io.EOF {
 				break
 			}
+			log.Printf("read next block with size %d (max size = %d)", uint64(n), uint64(len(chunk)))
 		}
 
+		log.Printf("end put blocks")
 		// Commit block list
 		return b.PutBlockList(container, name, blockList)
 	}
