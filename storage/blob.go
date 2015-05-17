@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -538,11 +539,11 @@ func (b BlobStorageClient) putBlockBlob(container, name string, blob io.Reader, 
 	chunk := make([]byte, chunkSize)
 	n, err := io.ReadFull(blob, chunk)
 	//n, err := blob.Read(chunk)
-	if err != nil && err != io.EOF {
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return err
 	}
 
-	if err == io.EOF {
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
 		// Fits into one block
 		return b.putSingleBlockBlob(container, name, chunk[:n])
 	} else {
@@ -551,33 +552,46 @@ func (b BlobStorageClient) putBlockBlob(container, name string, blob io.Reader, 
 
 		var totalUploadedData int64 = 0
 		// Put blocks
+		res := make(chan error)
+		copied := make(chan bool)
+		wg := sync.WaitGroup{}
 		for blockNum := 0; ; blockNum++ {
 			id := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%011d", blockNum)))
-			data := chunk[:n]
-			log.Printf("put block id %d with size %v (max size = %d)", blockNum, uint64(len(data)), uint64(len(chunk)))
-			err = b.PutBlock(container, name, id, data)
-			totalUploadedData = totalUploadedData + int64(len(data))
-			if err != nil {
-				return err
-			}
-
+			wg.Add(1)
+			log.Printf("put block #%d/id %s with size %d", blockNum, id, n)
+			go func(id string) {
+				// copy buffer to ovoid race condition
+				data := make([]byte, n)
+				copy(data, chunk[:n])
+				copied <- true
+				err := b.PutBlock(container, name, id, data)
+				totalUploadedData += int64(len(data))
+				log.Printf("done block id %s, total uploaded data = %d/%d", id, totalUploadedData, blobTotalSize)
+				res <- err
+				wg.Done()
+			}(id)
 			blockList = append(blockList, Block{id, BlockStatusLatest})
 
 			// Read next block
-			n, err := io.ReadFull(blob, chunk)
-			if err != nil && err != io.EOF {
-				totalUploadedData = totalUploadedData + int64(n)
-				if totalUploadedData == blobTotalSize {
-					break
-				} else {
-					log.Printf("total uploaded data = %d (compare to %d)", totalUploadedData, blobTotalSize)
-					return err
-				}
+			<-copied // wait for goroutine to copy buffer before overwriting it
+			n, err = io.ReadFull(blob, chunk)
+			if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+				return err
 			}
 			if err == io.EOF {
 				break
 			}
-			log.Printf("read next block with size %d (max size = %d)", uint64(n), uint64(len(chunk)))
+			log.Printf("read next block with size %d", n)
+		}
+		log.Printf("waiting for uploads")
+		go func() {
+			wg.Wait()
+			close(res)
+		}()
+		for err := range res {
+			if err != nil {
+				return err
+			}
 		}
 
 		log.Printf("end put blocks")
